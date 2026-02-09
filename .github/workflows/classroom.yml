@@ -1,0 +1,276 @@
+name: Autograding Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  reproducible-code:
+    name: Reproducible Code (70 points)
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.test.outcome }}
+      details: ${{ steps.test.outputs.details }}
+      points: ${{ steps.test.outputs.points }}
+      passed: ${{ steps.test.outputs.passed }}
+      total: ${{ steps.test.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run reproducible code tests
+        id: test
+        continue-on-error: true
+        run: |
+          set +e
+          OUTPUT=$(uv run pytest tests/test_reproducible_tasks.py --junitxml=pytest-repro.xml -v 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "details<<$EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          max_points = 70
+
+          tree = ET.parse("pytest-repro.xml")
+          root = tree.getroot()
+
+          tests = 0
+          failures = 0
+          errors = 0
+          skipped = 0
+          for ts in root.iter("testsuite"):
+              tests += int(ts.attrib.get("tests", 0))
+              failures += int(ts.attrib.get("failures", 0))
+              errors += int(ts.attrib.get("errors", 0))
+              skipped += int(ts.attrib.get("skipped", 0))
+
+          passed = tests - failures - errors - skipped
+          if tests <= 0:
+              raise ValueError("No tests found in JUnit report.")
+
+          points = (max_points * passed) // tests
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={passed}\n")
+              f.write(f"total={tests}\n")
+              f.write(f"points={points}\n")
+          PY
+
+          exit $EXIT_CODE
+
+  git-workflow:
+    name: Git Workflow (30 points)
+    runs-on: ubuntu-latest
+    outputs:
+      result: ${{ steps.test.outcome }}
+      details: ${{ steps.test.outputs.details }}
+      points: ${{ steps.test.outputs.points }}
+      passed: ${{ steps.test.outputs.passed }}
+      total: ${{ steps.test.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run workflow tests
+        id: test
+        continue-on-error: true
+        run: |
+          set +e
+          OUTPUT=$(uv run pytest tests/test_workflow.py --junitxml=pytest-workflow.xml -v 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "details<<$EOF" >> $GITHUB_OUTPUT
+          echo "$OUTPUT" >> $GITHUB_OUTPUT
+          echo "$EOF" >> $GITHUB_OUTPUT
+
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          max_points = 30
+
+          tree = ET.parse("pytest-workflow.xml")
+          root = tree.getroot()
+
+          tests = 0
+          failures = 0
+          errors = 0
+          skipped = 0
+          for ts in root.iter("testsuite"):
+              tests += int(ts.attrib.get("tests", 0))
+              failures += int(ts.attrib.get("failures", 0))
+              errors += int(ts.attrib.get("errors", 0))
+              skipped += int(ts.attrib.get("skipped", 0))
+
+          passed = tests - failures - errors - skipped
+          if tests <= 0:
+              raise ValueError("No tests found in JUnit report.")
+
+          points = (max_points * passed) // tests
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"passed={passed}\n")
+              f.write(f"total={tests}\n")
+              f.write(f"points={points}\n")
+          PY
+
+          exit $EXIT_CODE
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+
+  feedback:
+    name: Post Feedback
+    runs-on: ubuntu-latest
+    needs: [reproducible-code, git-workflow]
+    if: always() && github.event_name == 'pull_request'
+    steps:
+      - name: Generate feedback comment
+        run: |
+          REPRO_POINTS="${{ needs.reproducible-code.outputs.points }}"
+          REPRO_PASSED="${{ needs.reproducible-code.outputs.passed }}"
+          REPRO_TOTAL="${{ needs.reproducible-code.outputs.total }}"
+          WORKFLOW_POINTS="${{ needs.git-workflow.outputs.points }}"
+          WORKFLOW_PASSED="${{ needs.git-workflow.outputs.passed }}"
+          WORKFLOW_TOTAL="${{ needs.git-workflow.outputs.total }}"
+
+          if [ "$REPRO_POINTS" -eq 70 ]; then
+            REPRO_EMOJI="✅"
+          else
+            REPRO_EMOJI="❌"
+          fi
+
+          if [ "$WORKFLOW_POINTS" -eq 30 ]; then
+            WORKFLOW_EMOJI="✅"
+          else
+            WORKFLOW_EMOJI="❌"
+          fi
+
+          TOTAL=$((REPRO_POINTS + WORKFLOW_POINTS))
+
+          cat << 'COMMENT_EOF' > comment.md
+          ## 📊 Autograding Results
+
+          | Component | Status | Points | Tests |
+          |-----------|--------|--------|-------|
+          COMMENT_EOF
+
+          echo "| Reproducible Code | $REPRO_EMOJI | $REPRO_POINTS/70 | $REPRO_PASSED/$REPRO_TOTAL |" >> comment.md
+          echo "| Git Workflow | $WORKFLOW_EMOJI | $WORKFLOW_POINTS/30 | $WORKFLOW_PASSED/$WORKFLOW_TOTAL |" >> comment.md
+          echo "| Total |  | $TOTAL/100 |" >> comment.md
+          echo "" >> comment.md
+
+          if [ "$REPRO_POINTS" -ne 70 ]; then
+            cat << 'FEEDBACK_EOF' >> comment.md
+          ### Reproducible code issues
+
+          Make sure you:
+
+          - Load parameters from config (config as data)
+          - Write outputs to a stable path (no timestamps in paths)
+          - Make execution deterministic (seeded randomness)
+          - Use named arguments (keyword only function calls)
+          - Save the config with the output
+
+          FEEDBACK_EOF
+          fi
+
+          if [ "$WORKFLOW_POINTS" -ne 30 ]; then
+            cat << 'FEEDBACK_EOF' >> comment.md
+          ### Git workflow issues
+
+          Make sure you:
+
+          - Use multiple commits
+          - Reference the issue number in at least one commit (closes #1)
+          - Use descriptive commit messages that start with a verb
+          - Create a pull request and merge it
+
+          FEEDBACK_EOF
+          fi
+
+          if [ "$TOTAL" == "100" ]; then
+            cat << 'FEEDBACK_EOF' >> comment.md
+          ### Excellent work
+
+          All tests passed.
+
+          FEEDBACK_EOF
+          fi
+
+          echo "" >> comment.md
+          echo "---" >> comment.md
+          echo "*This is an automated review. Check the Actions tab for detailed test output.*" >> comment.md
+
+      - name: Post comment to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const comment = fs.readFileSync('comment.md', 'utf8');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Autograding Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: comment
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: comment
+              });
+            }
+
